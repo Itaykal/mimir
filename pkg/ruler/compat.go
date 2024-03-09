@@ -12,8 +12,7 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
-	"github.com/gogo/status"
-	"github.com/grafana/dskit/httpgrpc"
+	"github.com/grafana/dskit/grpcutil"
 	"github.com/grafana/dskit/user"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -94,8 +93,9 @@ func (a *PusherAppender) Commit() error {
 	_, err := a.pusher.Push(user.InjectOrgID(a.ctx, a.userID), req)
 
 	if err != nil {
-		// Don't report errors that ended with 4xx HTTP status code (series limits, duplicate samples, out of order, etc.)
-		if resp, ok := httpgrpc.HTTPResponseFromError(err); !ok || resp.Code/100 != 4 {
+		// Don't report client errors, which are the same ones that would be reported with 4xx HTTP status code
+		// (e.g. series limits, duplicate samples, out of order, etc.)
+		if !mimirpb.IsClientError(err) {
 			a.failedWrites.Inc()
 		}
 	}
@@ -180,7 +180,7 @@ func MetricsQueryFunc(qf rules.QueryFunc, queries, failedQueries prometheus.Coun
 			return result, origErr
 		} else if err != nil {
 			// When remote querier enabled, consider anything an error except those with 4xx status code.
-			st, ok := status.FromError(err)
+			st, ok := grpcutil.ErrorToStatus(err)
 			if !(ok && st.Code()/100 == 4) {
 				failedQueries.Inc()
 			}

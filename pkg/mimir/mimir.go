@@ -30,6 +30,7 @@ import (
 	"github.com/grafana/dskit/server"
 	"github.com/grafana/dskit/services"
 	"github.com/grafana/dskit/signals"
+	"github.com/grafana/dskit/spanprofiler"
 	"github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
@@ -62,7 +63,6 @@ import (
 	"github.com/grafana/mimir/pkg/ruler"
 	"github.com/grafana/mimir/pkg/ruler/rulestore"
 	rulebucketclient "github.com/grafana/mimir/pkg/ruler/rulestore/bucketclient"
-	rulestorelocal "github.com/grafana/mimir/pkg/ruler/rulestore/local"
 	"github.com/grafana/mimir/pkg/scheduler"
 	"github.com/grafana/mimir/pkg/storage/bucket"
 	"github.com/grafana/mimir/pkg/storage/ingest"
@@ -243,7 +243,7 @@ func (c *Config) Validate(log log.Logger) error {
 	if c.isAnyModuleEnabled(Ingester, Write, All) && c.IngestStorage.Enabled && !c.Ingester.DeprecatedReturnOnlyGRPCErrors {
 		return errors.New("to use ingest storage (-ingest-storage.enabled) also enable -ingester.return-only-grpc-errors")
 	}
-	if err := c.BlocksStorage.Validate(c.Ingester.ActiveSeriesMetrics, log); err != nil {
+	if err := c.BlocksStorage.Validate(c.Ingester.ActiveSeriesMetrics); err != nil {
 		return errors.Wrap(err, "invalid TSDB config")
 	}
 	if err := c.Distributor.Validate(c.LimitsConfig); err != nil {
@@ -271,7 +271,7 @@ func (c *Config) Validate(log log.Logger) error {
 	if err := c.StoreGateway.Validate(c.LimitsConfig); err != nil {
 		return errors.Wrap(err, "invalid store-gateway config")
 	}
-	if err := c.Compactor.Validate(); err != nil {
+	if err := c.Compactor.Validate(log); err != nil {
 		return errors.Wrap(err, "invalid compactor config")
 	}
 	if err := c.AlertmanagerStorage.Validate(); err != nil {
@@ -333,7 +333,7 @@ func (c *Config) validateBucketConfigs() error {
 	}
 
 	// Validate ruler bucket config.
-	if c.isAnyModuleEnabled(All, Ruler, Backend) && c.RulerStorage.Backend != rulestorelocal.Name {
+	if c.isAnyModuleEnabled(All, Ruler, Backend) && c.RulerStorage.Backend != rulestore.BackendLocal {
 		errs.Add(errors.Wrap(validateBucketConfig(c.RulerStorage.Config, c.BlocksStorage.Bucket), "ruler storage"))
 	}
 
@@ -441,7 +441,7 @@ func (c *Config) validateFilesystemPaths(logger log.Logger) error {
 				checkValue: filepath.Join(c.RulerStorage.Filesystem.Directory, rulebucketclient.RulesPrefix),
 			})
 		}
-		if c.RulerStorage.Backend == rulestorelocal.Name {
+		if c.RulerStorage.Backend == rulestore.BackendLocal {
 			paths = append(paths, pathConfig{
 				name:       "ruler storage local directory",
 				cfgValue:   c.RulerStorage.Local.Directory,
@@ -685,35 +685,37 @@ type Mimir struct {
 	ServiceMap    map[string]services.Service
 	ModuleManager *modules.Manager
 
-	API                      *api.API
-	Server                   *server.Server
-	IngesterRing             *ring.Ring
-	TenantLimits             validation.TenantLimits
-	Overrides                *validation.Overrides
-	ActiveGroupsCleanup      *util.ActiveGroupsCleanupService
-	Distributor              *distributor.Distributor
-	Ingester                 *ingester.Ingester
-	Flusher                  *flusher.Flusher
-	FrontendV1               *frontendv1.Frontend
-	RuntimeConfig            *runtimeconfig.Manager
-	QuerierQueryable         prom_storage.SampleAndChunkQueryable
-	ExemplarQueryable        prom_storage.ExemplarQueryable
-	MetadataSupplier         querier.MetadataSupplier
-	QuerierEngine            *promql.Engine
-	QueryFrontendTripperware querymiddleware.Tripperware
-	QueryFrontendCodec       querymiddleware.Codec
-	Ruler                    *ruler.Ruler
-	RulerDirectStorage       rulestore.RuleStore
-	RulerCachedStorage       rulestore.RuleStore
-	Alertmanager             *alertmanager.MultitenantAlertmanager
-	Compactor                *compactor.MultitenantCompactor
-	StoreGateway             *storegateway.StoreGateway
-	StoreQueryable           prom_storage.Queryable
-	MemberlistKV             *memberlist.KVInitService
-	ActivityTracker          *activitytracker.ActivityTracker
-	Vault                    *vault.Vault
-	UsageStatsReporter       *usagestats.Reporter
-	BuildInfoHandler         http.Handler
+	API                           *api.API
+	Server                        *server.Server
+	IngesterRing                  *ring.Ring
+	IngesterPartitionRingWatcher  *ring.PartitionRingWatcher
+	IngesterPartitionInstanceRing *ring.PartitionInstanceRing
+	TenantLimits                  validation.TenantLimits
+	Overrides                     *validation.Overrides
+	ActiveGroupsCleanup           *util.ActiveGroupsCleanupService
+	Distributor                   *distributor.Distributor
+	Ingester                      *ingester.Ingester
+	Flusher                       *flusher.Flusher
+	FrontendV1                    *frontendv1.Frontend
+	RuntimeConfig                 *runtimeconfig.Manager
+	QuerierQueryable              prom_storage.SampleAndChunkQueryable
+	ExemplarQueryable             prom_storage.ExemplarQueryable
+	MetadataSupplier              querier.MetadataSupplier
+	QuerierEngine                 *promql.Engine
+	QueryFrontendTripperware      querymiddleware.Tripperware
+	QueryFrontendCodec            querymiddleware.Codec
+	Ruler                         *ruler.Ruler
+	RulerDirectStorage            rulestore.RuleStore
+	RulerCachedStorage            rulestore.RuleStore
+	Alertmanager                  *alertmanager.MultitenantAlertmanager
+	Compactor                     *compactor.MultitenantCompactor
+	StoreGateway                  *storegateway.StoreGateway
+	StoreQueryable                prom_storage.Queryable
+	MemberlistKV                  *memberlist.KVInitService
+	ActivityTracker               *activitytracker.ActivityTracker
+	Vault                         *vault.Vault
+	UsageStatsReporter            *usagestats.Reporter
+	BuildInfoHandler              http.Handler
 }
 
 // New makes a new Mimir.
@@ -757,7 +759,14 @@ func New(cfg Config, reg prometheus.Registerer) (*Mimir, error) {
 	}
 
 	mimir.setupObjstoreTracing()
-	otel.SetTracerProvider(NewOpenTelemetryProviderBridge(opentracing.GlobalTracer()))
+
+	// Injects span profiler into the tracer for cross-referencing between traces and profiles.
+	// Note, for performance reasons, span profiler only labels root spans.
+	tracer := spanprofiler.NewTracer(opentracing.GlobalTracer())
+	// We are passing the wrapped tracer to both opentracing and opentelemetry until after the ecosystem
+	// gets converged into the latter.
+	opentracing.SetGlobalTracer(tracer)
+	otel.SetTracerProvider(NewOpenTelemetryProviderBridge(tracer))
 
 	mimir.Cfg.Server.Router = mux.NewRouter()
 
@@ -829,9 +838,9 @@ func (t *Mimir) Run() error {
 	// implementation provided by module.Ring over the BasicLifecycler
 	// available in ingesters
 	if t.IngesterRing != nil {
-		t.API.RegisterRing(t.IngesterRing)
+		t.API.RegisterIngesterRing(t.IngesterRing)
 	} else if t.Ingester != nil {
-		t.API.RegisterRing(t.Ingester.RingHandler())
+		t.API.RegisterIngesterRing(t.Ingester.RingHandler())
 	}
 
 	// get all services, create service manager and tell it to start

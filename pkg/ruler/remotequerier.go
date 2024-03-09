@@ -30,6 +30,7 @@ import (
 	"github.com/prometheus/prometheus/promql"
 	"golang.org/x/exp/slices"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 
 	"github.com/grafana/mimir/pkg/querier/api"
 	"github.com/grafana/mimir/pkg/util/spanlogger"
@@ -52,7 +53,6 @@ const (
 	formatProtobuf = "protobuf"
 )
 
-var userAgent = fmt.Sprintf("mimir/%s", version.Version)
 var allFormats = []string{formatJSON, formatProtobuf}
 
 // QueryFrontendConfig defines query-frontend transport configuration.
@@ -168,7 +168,7 @@ func (q *RemoteQuerier) Read(ctx context.Context, query *prompb.Query) (*prompb.
 			{Key: textproto.CanonicalMIMEHeaderKey("Content-Encoding"), Values: []string{"snappy"}},
 			{Key: textproto.CanonicalMIMEHeaderKey("Accept-Encoding"), Values: []string{"snappy"}},
 			{Key: textproto.CanonicalMIMEHeaderKey("Content-Type"), Values: []string{"application/x-protobuf"}},
-			{Key: textproto.CanonicalMIMEHeaderKey("User-Agent"), Values: []string{userAgent}},
+			{Key: textproto.CanonicalMIMEHeaderKey("User-Agent"), Values: []string{version.UserAgent()}},
 			{Key: textproto.CanonicalMIMEHeaderKey("X-Prometheus-Remote-Read-Version"), Values: []string{"0.1.0"}},
 		}),
 	}
@@ -272,7 +272,7 @@ func (q *RemoteQuerier) createRequest(ctx context.Context, query string, ts time
 		Url:    q.promHTTPPrefix + queryEndpointPath,
 		Body:   body,
 		Headers: injectHTTPGrpcReadConsistencyHeader(ctx, []*httpgrpc.Header{
-			{Key: textproto.CanonicalMIMEHeaderKey("User-Agent"), Values: []string{userAgent}},
+			{Key: textproto.CanonicalMIMEHeaderKey("User-Agent"), Values: []string{version.UserAgent()}},
 			{Key: textproto.CanonicalMIMEHeaderKey("Content-Type"), Values: []string{mimeTypeFormPost}},
 			{Key: textproto.CanonicalMIMEHeaderKey("Content-Length"), Values: []string{strconv.Itoa(len(body))}},
 			{Key: textproto.CanonicalMIMEHeaderKey("Accept"), Values: []string{acceptHeader}},
@@ -309,11 +309,25 @@ func (q *RemoteQuerier) sendRequest(ctx context.Context, req *httpgrpc.HTTPReque
 			}
 			return resp, nil
 		}
-		// 4xx errors shouldn't be retried because it is expected that
-		// running the same query gives rise to the same 4xx error.
-		if code := grpcutil.ErrorToStatusCode(err); code/100 == 4 {
-			return nil, err
+
+		// Bail out if the error is known to be not retriable.
+		switch code := grpcutil.ErrorToStatusCode(err); code {
+		case codes.ResourceExhausted:
+			// In case the server is configured with "grpc-max-send-msg-size-bytes",
+			// and the response exceeds this limit, there is no point retrying the request.
+			// This is a special case, refer to grafana/mimir#7216.
+			if strings.Contains(err.Error(), "message larger than max") {
+				return nil, err
+			}
+		default:
+			// In case the error was a wrapped HTTPResponse, its code represents HTTP status;
+			// 4xx errors shouldn't be retried because it is expected that
+			// running the same query gives rise to the same 4xx error.
+			if code/100 == 4 {
+				return nil, err
+			}
 		}
+
 		if !retry.Ongoing() {
 			return nil, err
 		}

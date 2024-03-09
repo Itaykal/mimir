@@ -30,6 +30,7 @@ import (
 	"github.com/gogo/protobuf/proto"
 	"github.com/gogo/protobuf/types"
 	"github.com/grafana/dskit/gate"
+	"github.com/grafana/dskit/grpcutil"
 	dskit_metrics "github.com/grafana/dskit/metrics"
 	"github.com/grafana/regexp"
 	"github.com/oklog/ulid"
@@ -50,7 +51,6 @@ import (
 	"github.com/thanos-io/objstore/providers/filesystem"
 	"golang.org/x/exp/slices"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	"github.com/grafana/mimir/pkg/mimirpb"
 	"github.com/grafana/mimir/pkg/storage/bucket"
@@ -960,7 +960,7 @@ func (c *spyPostingsCache) StoreExpandedPostings(_ string, _ ulid.ULID, _ indexc
 	c.storedExpandedPostingsVal = v
 }
 
-func (c *spyPostingsCache) StorePostings(_ string, _ ulid.ULID, l labels.Label, v []byte) {
+func (c *spyPostingsCache) StorePostings(_ string, _ ulid.ULID, l labels.Label, v []byte, _ time.Duration) {
 	if c.storedExpandedPostingsVal == nil {
 		c.storedPostingsVal = make(map[labels.Label][]byte)
 	}
@@ -1006,7 +1006,7 @@ func prepareTestBlock(tb test.TB, dataSetup ...func(tb testing.TB, appenderFacto
 
 	id, minT, maxT := uploadTestBlock(tb, tmpDir, bkt, dataSetup)
 
-	r, err := indexheader.NewStreamBinaryReader(context.Background(), log.NewNopLogger(), bkt, tmpDir, id, true, mimir_tsdb.DefaultPostingOffsetInMemorySampling, indexheader.NewStreamBinaryReaderMetrics(nil), indexheader.Config{})
+	r, err := indexheader.NewStreamBinaryReader(context.Background(), log.NewNopLogger(), bkt, tmpDir, id, mimir_tsdb.DefaultPostingOffsetInMemorySampling, indexheader.NewStreamBinaryReaderMetrics(nil), indexheader.Config{})
 	require.NoError(tb, err)
 
 	return func() *bucketBlock {
@@ -1492,7 +1492,6 @@ func benchBucketSeries(t test.TB, skipChunk bool, samplesPerSeries, totalSeries 
 					EagerLoadingStartupEnabled: false,
 					LazyLoadingEnabled:         false,
 					LazyLoadingIdleTimeout:     0,
-					SparsePersistenceEnabled:   true,
 				},
 			},
 			selectAllStrategy{},
@@ -1621,7 +1620,6 @@ func TestBucketStore_Series_Concurrency(t *testing.T) {
 								EagerLoadingStartupEnabled: false,
 								LazyLoadingEnabled:         false,
 								LazyLoadingIdleTimeout:     0,
-								SparsePersistenceEnabled:   true,
 							},
 						},
 						selectAllStrategy{},
@@ -1727,7 +1725,7 @@ func TestBucketStore_Series_OneBlock_InMemIndexCacheSegfault(t *testing.T) {
 			partitioners: newGapBasedPartitioners(mimir_tsdb.DefaultPartitionerMaxGapSize, nil),
 			chunkObjs:    []string{filepath.Join(id.String(), "chunks", "000001")},
 		}
-		b1.indexHeaderReader, err = indexheader.NewStreamBinaryReader(context.Background(), log.NewNopLogger(), bkt, tmpDir, b1.meta.ULID, true, mimir_tsdb.DefaultPostingOffsetInMemorySampling, indexheader.NewStreamBinaryReaderMetrics(nil), indexheader.Config{})
+		b1.indexHeaderReader, err = indexheader.NewStreamBinaryReader(context.Background(), log.NewNopLogger(), bkt, tmpDir, b1.meta.ULID, mimir_tsdb.DefaultPostingOffsetInMemorySampling, indexheader.NewStreamBinaryReaderMetrics(nil), indexheader.Config{})
 		assert.NoError(t, err)
 	}
 
@@ -1765,7 +1763,7 @@ func TestBucketStore_Series_OneBlock_InMemIndexCacheSegfault(t *testing.T) {
 			partitioners: newGapBasedPartitioners(mimir_tsdb.DefaultPartitionerMaxGapSize, nil),
 			chunkObjs:    []string{filepath.Join(id.String(), "chunks", "000001")},
 		}
-		b2.indexHeaderReader, err = indexheader.NewStreamBinaryReader(context.Background(), log.NewNopLogger(), bkt, tmpDir, b2.meta.ULID, true, mimir_tsdb.DefaultPostingOffsetInMemorySampling, indexheader.NewStreamBinaryReaderMetrics(nil), indexheader.Config{})
+		b2.indexHeaderReader, err = indexheader.NewStreamBinaryReader(context.Background(), log.NewNopLogger(), bkt, tmpDir, b2.meta.ULID, mimir_tsdb.DefaultPostingOffsetInMemorySampling, indexheader.NewStreamBinaryReaderMetrics(nil), indexheader.Config{})
 		assert.NoError(t, err)
 	}
 
@@ -1775,9 +1773,8 @@ func TestBucketStore_Series_OneBlock_InMemIndexCacheSegfault(t *testing.T) {
 		logger:     logger,
 		indexCache: indexCache,
 		indexReaderPool: indexheader.NewReaderPool(log.NewNopLogger(), indexheader.Config{
-			LazyLoadingEnabled:       false,
-			LazyLoadingIdleTimeout:   0,
-			SparsePersistenceEnabled: true,
+			LazyLoadingEnabled:     false,
+			LazyLoadingIdleTimeout: 0,
 		}, gate.NewNoop(), indexheader.NewReaderPoolMetrics(nil), indexheader.LazyLoadedHeadersSnapshotConfig{}),
 		metrics:  NewBucketStoreMetrics(nil),
 		blockSet: &bucketBlockSet{blocks: []*bucketBlock{b1, b2}},
@@ -1946,7 +1943,6 @@ func TestBucketStore_Series_ErrorUnmarshallingRequestHints(t *testing.T) {
 				EagerLoadingStartupEnabled: false,
 				LazyLoadingEnabled:         false,
 				LazyLoadingIdleTimeout:     0,
-				SparsePersistenceEnabled:   true,
 			},
 		},
 		selectAllStrategy{},
@@ -2004,7 +2000,6 @@ func TestBucketStore_Series_CanceledRequest(t *testing.T) {
 				EagerLoadingStartupEnabled: false,
 				LazyLoadingEnabled:         false,
 				LazyLoadingIdleTimeout:     0,
-				SparsePersistenceEnabled:   true,
 			},
 		},
 		selectAllStrategy{},
@@ -2033,14 +2028,14 @@ func TestBucketStore_Series_CanceledRequest(t *testing.T) {
 	srv := newStoreGatewayTestServer(t, store)
 	_, _, _, _, err = srv.Series(ctx, req)
 	assert.Error(t, err)
-	s, ok := status.FromError(err)
+	s, ok := grpcutil.ErrorToStatus(err)
 	assert.True(t, ok)
 	assert.Equal(t, codes.Canceled, s.Code())
 
 	req.StreamingChunksBatchSize = 10
 	_, _, _, _, err = srv.Series(ctx, req)
 	assert.Error(t, err)
-	s, ok = status.FromError(err)
+	s, ok = grpcutil.ErrorToStatus(err)
 	assert.True(t, ok)
 	assert.Equal(t, codes.Canceled, s.Code())
 }
@@ -2070,7 +2065,6 @@ func TestBucketStore_Series_InvalidRequest(t *testing.T) {
 				EagerLoadingStartupEnabled: false,
 				LazyLoadingEnabled:         false,
 				LazyLoadingIdleTimeout:     0,
-				SparsePersistenceEnabled:   true,
 			},
 		},
 		selectAllStrategy{},
@@ -2096,7 +2090,7 @@ func TestBucketStore_Series_InvalidRequest(t *testing.T) {
 	srv := newStoreGatewayTestServer(t, store)
 	_, _, _, _, err = srv.Series(context.Background(), req)
 	assert.Error(t, err)
-	s, ok := status.FromError(err)
+	s, ok := grpcutil.ErrorToStatus(err)
 	assert.True(t, ok)
 	assert.Equal(t, codes.InvalidArgument, s.Code())
 	assert.ErrorContains(t, s.Err(), "error parsing regexp: missing closing )")
@@ -2197,7 +2191,6 @@ func testBucketStoreSeriesBlockWithMultipleChunks(
 				EagerLoadingStartupEnabled: false,
 				LazyLoadingEnabled:         false,
 				LazyLoadingIdleTimeout:     0,
-				SparsePersistenceEnabled:   true,
 			},
 		},
 		selectAllStrategy{},
@@ -2363,7 +2356,6 @@ func TestBucketStore_Series_Limits(t *testing.T) {
 								EagerLoadingStartupEnabled: false,
 								LazyLoadingEnabled:         false,
 								LazyLoadingIdleTimeout:     0,
-								SparsePersistenceEnabled:   true,
 							},
 						},
 						selectAllStrategy{},
@@ -2563,7 +2555,6 @@ func setupStoreForHintsTest(t *testing.T, maxSeriesPerBatch int, opts ...BucketS
 				EagerLoadingStartupEnabled: false,
 				LazyLoadingEnabled:         false,
 				LazyLoadingIdleTimeout:     0,
-				SparsePersistenceEnabled:   true,
 			},
 		},
 		selectAllStrategy{},
@@ -2747,7 +2738,7 @@ func TestLabelNames_Cancelled(t *testing.T) {
 
 	_, err := store.LabelNames(ctx, req)
 	assert.Error(t, err)
-	s, ok := status.FromError(err)
+	s, ok := grpcutil.ErrorToStatus(err)
 	assert.True(t, ok)
 	assert.Equal(t, codes.Canceled, s.Code())
 }
@@ -2774,7 +2765,7 @@ func TestLabelValues_Cancelled(t *testing.T) {
 
 	_, err := store.LabelValues(ctx, req)
 	assert.Error(t, err)
-	s, ok := status.FromError(err)
+	s, ok := grpcutil.ErrorToStatus(err)
 	assert.True(t, ok)
 	assert.Equal(t, codes.Canceled, s.Code())
 }

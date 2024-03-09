@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 
 	"github.com/grafana/dskit/httpgrpc"
 	"github.com/grafana/dskit/tenant"
@@ -16,6 +17,7 @@ import (
 	"github.com/grafana/mimir/pkg/distributor"
 	ingester_client "github.com/grafana/mimir/pkg/ingester/client"
 	"github.com/grafana/mimir/pkg/querier/api"
+	"github.com/grafana/mimir/pkg/querier/worker"
 	"github.com/grafana/mimir/pkg/util"
 	util_math "github.com/grafana/mimir/pkg/util/math"
 	"github.com/grafana/mimir/pkg/util/validation"
@@ -122,6 +124,8 @@ func ActiveSeriesCardinalityHandler(d Distributor, limits *validation.Overrides)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", strconv.Itoa(len(bytes)))
+		w.Header().Set(worker.ResponseStreamingEnabledHeader, "true")
 
 		// Nothing we can do about this error, so ignore it.
 		_, _ = w.Write(bytes)
@@ -129,7 +133,7 @@ func ActiveSeriesCardinalityHandler(d Distributor, limits *validation.Overrides)
 }
 
 func respondFromError(err error, w http.ResponseWriter) {
-	httpResp, ok := httpgrpc.HTTPResponseFromError(errors.Cause(err))
+	httpResp, ok := httpgrpc.HTTPResponseFromError(err)
 	if !ok {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

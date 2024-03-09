@@ -94,7 +94,7 @@ func FromLabelAdaptersToMetric(ls []LabelAdapter) model.Metric {
 	return util.LabelsToMetric(FromLabelAdaptersToLabels(ls))
 }
 
-// formatLabelSet formats label adapters as a metric name with labels, while preserving
+// FromLabelAdaptersToString formats label adapters as a metric name with labels, while preserving
 // label order, and keeping duplicates. If there are multiple "__name__" labels, only
 // first one is used as metric name, other ones will be included as regular labels.
 func FromLabelAdaptersToString(ls []LabelAdapter) string {
@@ -265,6 +265,7 @@ func fromSpansProtoToSpans(s []BucketSpan) []histogram.Span {
 	return *(*[]histogram.Span)(unsafe.Pointer(&s))
 }
 
+// FromHistogramToHistogramProto does not make a deepcopy, slices are referenced
 func FromHistogramToHistogramProto(timestamp int64, h *histogram.Histogram) Histogram {
 	if h == nil {
 		panic("FromHistogramToHistogramProto called on nil histogram")
@@ -286,6 +287,7 @@ func FromHistogramToHistogramProto(timestamp int64, h *histogram.Histogram) Hist
 	}
 }
 
+// FromFloatHistogramToHistogramProto does not make a deepcopy, slices are referenced
 func FromFloatHistogramToHistogramProto(timestamp int64, fh *histogram.FloatHistogram) Histogram {
 	if fh == nil {
 		panic("FromFloatHistogramToHistogramProto called on nil histogram")

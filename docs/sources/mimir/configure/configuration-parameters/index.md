@@ -141,10 +141,10 @@ api:
   # CLI flag: -api.skip-label-name-validation-header-enabled
   [skip_label_name_validation_header_enabled: <boolean> | default = false]
 
-  # (experimental) If true, store metadata when ingesting metrics via OTLP. This
+  # (deprecated) If true, store metadata when ingesting metrics via OTLP. This
   # makes metric descriptions and types available for metrics ingested via OTLP.
   # CLI flag: -distributor.enable-otlp-metadata-storage
-  [enable_otel_metadata_translation: <boolean> | default = false]
+  [enable_otel_metadata_translation: <boolean> | default = true]
 
   # (advanced) HTTP URL path under which the Alertmanager ui and api will be
   # served.
@@ -692,6 +692,11 @@ grpc_tls_config:
 # CLI flag: -server.log-source-ips-enabled
 [log_source_ips_enabled: <boolean> | default = false]
 
+# Log all source IPs instead of only the originating one. Only used if
+# server.log-source-ips-enabled is true
+# CLI flag: -server.log-source-ips-full
+[log_source_ips_full: <boolean> | default = false]
+
 # (advanced) Header field storing the source IPs. Only used if
 # server.log-source-ips-enabled is true. If not set the default Forwarded,
 # X-Real-IP and X-Forwarded-For headers are used
@@ -923,9 +928,10 @@ instance_limits:
 # CLI flag: -distributor.write-requests-buffer-pooling-enabled
 [write_requests_buffer_pooling_enabled: <boolean> | default = true]
 
-# (experimental) Use experimental method of limiting push requests.
+# (deprecated) When enabled, in-flight write requests limit is checked as soon
+# as the gRPC request is received, before the request is decoded and parsed.
 # CLI flag: -distributor.limit-inflight-requests-using-grpc-method-limiter
-[limit_inflight_requests_using_grpc_method_limiter: <boolean> | default = false]
+[limit_inflight_requests_using_grpc_method_limiter: <boolean> | default = true]
 
 # (advanced) Number of pre-allocated workers used to forward push requests to
 # the ingesters. If 0, no workers will be used and a new goroutine will be
@@ -1162,9 +1168,10 @@ instance_limits:
 # CLI flag: -ingester.log-utilization-based-limiter-cpu-samples
 [log_utilization_based_limiter_cpu_samples: <boolean> | default = false]
 
-# (experimental) Use experimental method of limiting push requests.
+# (deprecated) When enabled, in-flight write requests limit is checked as soon
+# as the gRPC request is received, before the request is decoded and parsed.
 # CLI flag: -ingester.limit-inflight-requests-using-grpc-method-limiter
-[limit_inflight_requests_using_grpc_method_limiter: <boolean> | default = false]
+[limit_inflight_requests_using_grpc_method_limiter: <boolean> | default = true]
 
 # (experimental) Each error will be logged once in this many times. Use 0 to log
 # all of them.
@@ -1205,7 +1212,7 @@ The `querier` block configures the querier.
 # CLI flag: -querier.query-store-after
 [query_store_after: <duration> | default = 12h]
 
-# (advanced) Maximum duration into the future you can query. 0 to disable.
+# (deprecated) Maximum duration into the future you can query. 0 to disable.
 # CLI flag: -querier.max-query-into-future
 [max_query_into_future: <duration> | default = 10m]
 
@@ -1377,6 +1384,11 @@ The `frontend` block configures the query-frontend.
 # with some statistics is logged for every query.
 # CLI flag: -query-frontend.query-stats-enabled
 [query_stats_enabled: <boolean> | default = true]
+
+# (experimental) Timeout for writing active series responses. 0 means the value
+# from `-server.http-write-timeout` is used.
+# CLI flag: -query-frontend.active-series-write-timeout
+[active_series_write_timeout: <duration> | default = 5m]
 
 # (advanced) Maximum number of outstanding requests per tenant per frontend;
 # requests beyond this error with HTTP 429.
@@ -2251,6 +2263,14 @@ alertmanager_client:
 # removed for any tenant that does not have a configuration.
 # CLI flag: -alertmanager.enable-state-cleanup
 [enable_state_cleanup: <boolean> | default = true]
+
+# (experimental) Enable UTF-8 strict mode. Allows UTF-8 characters in the
+# matchers for routes and inhibition rules, in silences, and in the labels for
+# alerts. It is recommended to check both alertmanager_matchers_disagree_total
+# and alertmanager_matchers_incompatible_total metrics before using this mode as
+# otherwise some tenant configurations might fail to load.
+# CLI flag: -alertmanager.utf8-strict-mode-enabled
+[utf8_strict_mode: <boolean> | default = false]
 ```
 
 ### alertmanager_storage
@@ -2343,7 +2363,7 @@ circuit_breaker:
   # (experimental) How long the circuit breaker will stay in the open state
   # before allowing some requests
   # CLI flag: -ingester.client.circuit-breaker.cooldown-period
-  [cooldown_period: <duration> | default = 1m]
+  [cooldown_period: <duration> | default = 10s]
 
 # (deprecated) If set to true, gRPC status codes will be reported in
 # "status_code" label of "cortex_ingester_client_request_duration_seconds"
@@ -2539,6 +2559,12 @@ The `frontend_worker` block configures the worker running within the querier, pi
 # query-scheduler.
 # The CLI flags prefix for this block configuration is: querier.scheduler-client
 [query_scheduler_grpc_client_config: <grpc_client>]
+
+# (experimental) Enables streaming of responses from querier to query-frontend
+# for response types that support it (currently only `active_series` responses
+# do).
+# CLI flag: -querier.response-streaming-enabled
+[response_streaming_enabled: <boolean> | default = false]
 ```
 
 ### etcd
@@ -3660,17 +3686,6 @@ bucket_store:
   # CLI flag: -blocks-storage.bucket-store.series-hash-cache-max-size-bytes
   [series_hash_cache_max_size_bytes: <int> | default = 1073741824]
 
-  # (deprecated) If enabled, store-gateway will lazy load an index-header only
-  # once required by a query.
-  # CLI flag: -blocks-storage.bucket-store.index-header-lazy-loading-enabled
-  [index_header_lazy_loading_enabled: <boolean> | default = true]
-
-  # (deprecated) If index-header lazy loading is enabled and this setting is >
-  # 0, the store-gateway will offload unused index-headers after 'idle timeout'
-  # inactivity.
-  # CLI flag: -blocks-storage.bucket-store.index-header-lazy-loading-idle-timeout
-  [index_header_lazy_loading_idle_timeout: <duration> | default = 1h]
-
   # (advanced) Max size - in bytes - of a gap for which the partitioner
   # aggregates together two bucket GET object requests.
   # CLI flag: -blocks-storage.bucket-store.partitioner-max-gap-bytes
@@ -3704,16 +3719,10 @@ bucket_store:
     # CLI flag: -blocks-storage.bucket-store.index-header.lazy-loading-idle-timeout
     [lazy_loading_idle_timeout: <duration> | default = 1h]
 
-    # (experimental) Maximum number of concurrent index header loads across all
+    # (advanced) Maximum number of concurrent index header loads across all
     # tenants. If set to 0, concurrency is unlimited.
     # CLI flag: -blocks-storage.bucket-store.index-header.lazy-loading-concurrency
     [lazy_loading_concurrency: <int> | default = 4]
-
-    # (experimental) If enabled, store-gateway will persist a sparse version of
-    # the index-header to disk on construction and load sparse index-headers
-    # from disk instead of the whole index-header.
-    # CLI flag: -blocks-storage.bucket-store.index-header.sparse-persistence-enabled
-    [sparse_persistence_enabled: <boolean> | default = true]
 
     # (advanced) If true, verify the checksum of index headers upon loading them
     # (either on startup or lazily when lazy loading is enabled). Setting to
@@ -3917,6 +3926,12 @@ tsdb:
   # percentage (0-100).
   # CLI flag: -blocks-storage.tsdb.early-head-compaction-min-estimated-series-reduction-percentage
   [early_head_compaction_min_estimated_series_reduction_percentage: <int> | default = 15]
+
+  # (experimental) Allows head compaction to happen when the min block range can
+  # no longer be appended, without requiring 1.5x the chunk range worth of data
+  # in the head.
+  # CLI flag: -blocks-storage.tsdb.timely-head-compaction-enabled
+  [timely_head_compaction_enabled: <boolean> | default = false]
 ```
 
 ### compactor
@@ -3963,8 +3978,8 @@ The `compactor` block configures the compactor component.
 # CLI flag: -compactor.first-level-compaction-wait-period
 [first_level_compaction_wait_period: <duration> | default = 25m]
 
-# (advanced) How frequently compactor should run blocks cleanup and maintenance,
-# as well as update the bucket index.
+# (advanced) How frequently the compactor should run blocks cleanup and
+# maintenance, as well as update the bucket index.
 # CLI flag: -compactor.cleanup-interval
 [cleanup_interval: <duration> | default = 15m]
 
@@ -3974,15 +3989,16 @@ The `compactor` block configures the compactor component.
 [cleanup_concurrency: <int> | default = 20]
 
 # (advanced) Time before a block marked for deletion is deleted from bucket. If
-# not 0, blocks will be marked for deletion and compactor component will
+# not 0, blocks will be marked for deletion and the compactor component will
 # permanently delete blocks marked for deletion from the bucket. If 0, blocks
 # will be deleted straight away. Note that deleting blocks immediately can cause
 # query failures.
 # CLI flag: -compactor.deletion-delay
 [deletion_delay: <duration> | default = 12h]
 
-# (advanced) For tenants marked for deletion, this is time between deleting of
-# last block, and doing final cleanup (marker files, debug files) of the tenant.
+# (advanced) For tenants marked for deletion, this is the time between deletion
+# of the last block, and doing final cleanup (marker files, debug files) of the
+# tenant.
 # CLI flag: -compactor.tenant-cleanup-delay
 [tenant_cleanup_delay: <duration> | default = 6h]
 
@@ -4004,8 +4020,8 @@ The `compactor` block configures the compactor component.
 [max_opening_blocks_concurrency: <int> | default = 1]
 
 # (advanced) Max number of blocks that can be closed concurrently during split
-# compaction. Note that closing of newly compacted block uses a lot of memory
-# for writing index.
+# compaction. Note that closing a newly compacted block uses a lot of memory for
+# writing the index.
 # CLI flag: -compactor.max-closing-blocks-concurrency
 [max_closing_blocks_concurrency: <int> | default = 1]
 
@@ -4019,15 +4035,15 @@ The `compactor` block configures the compactor component.
 [max_block_upload_validation_concurrency: <int> | default = 1]
 
 # (advanced) Comma separated list of tenants that can be compacted. If
-# specified, only these tenants will be compacted by compactor, otherwise all
-# tenants can be compacted. Subject to sharding.
+# specified, only these tenants will be compacted by the compactor, otherwise
+# all tenants can be compacted. Subject to sharding.
 # CLI flag: -compactor.enabled-tenants
 [enabled_tenants: <string> | default = ""]
 
-# (advanced) Comma separated list of tenants that cannot be compacted by this
-# compactor. If specified, and compactor would normally pick given tenant for
-# compaction (via -compactor.enabled-tenants or sharding), it will be ignored
-# instead.
+# (advanced) Comma separated list of tenants that cannot be compacted by the
+# compactor. If specified, and the compactor would normally pick a given tenant
+# for compaction (via -compactor.enabled-tenants or sharding), it will be
+# ignored instead.
 # CLI flag: -compactor.disabled-tenants
 [disabled_tenants: <string> | default = ""]
 

@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/go-kit/log/level"
 	"github.com/gogo/protobuf/types"
 	"github.com/grafana/dskit/gate"
+	"github.com/grafana/dskit/grpcutil"
 	"github.com/grafana/dskit/multierror"
 	"github.com/grafana/dskit/runutil"
 	"github.com/oklog/ulid"
@@ -125,12 +127,12 @@ type BucketStore struct {
 
 type noopCache struct{}
 
-func (noopCache) StorePostings(string, ulid.ULID, labels.Label, []byte) {}
+func (noopCache) StorePostings(string, ulid.ULID, labels.Label, []byte, time.Duration) {}
 func (noopCache) FetchMultiPostings(_ context.Context, _ string, _ ulid.ULID, keys []labels.Label) indexcache.BytesResult {
 	return &indexcache.MapIterator[labels.Label]{Keys: keys}
 }
 
-func (noopCache) StoreSeriesForRef(string, ulid.ULID, storage.SeriesRef, []byte) {}
+func (noopCache) StoreSeriesForRef(string, ulid.ULID, storage.SeriesRef, []byte, time.Duration) {}
 func (noopCache) FetchMultiSeriesForRefs(_ context.Context, _ string, _ ulid.ULID, ids []storage.SeriesRef) (map[storage.SeriesRef][]byte, []storage.SeriesRef) {
 	return map[storage.SeriesRef][]byte{}, ids
 }
@@ -548,7 +550,7 @@ func (s *BucketStore) Series(req *storepb.SeriesRequest, srv storegatewaypb.Stor
 			return
 		}
 		code := codes.Internal
-		if st, ok := status.FromError(errors.Cause(err)); ok {
+		if st, ok := grpcutil.ErrorToStatus(err); ok {
 			code = st.Code()
 		} else if errors.Is(err, context.Canceled) {
 			code = codes.Canceled
@@ -668,7 +670,7 @@ func (s *BucketStore) Series(req *storepb.SeriesRequest, srv storegatewaypb.Stor
 
 	start := time.Now()
 	if req.StreamingChunksBatchSize > 0 {
-		var seriesChunkIt seriesChunksSetIterator
+		var seriesChunkIt iterator[seriesChunksSet]
 		seriesChunkIt, err = s.streamingChunksSetForBlocks(ctx, req, blocks, indexReaders, readers, shardSelector, matchers, chunksLimiter, seriesLimiter, stats, reuse)
 		if err != nil {
 			return err
@@ -769,7 +771,7 @@ func (s *BucketStore) sendStreamingSeriesLabelsAndStats(
 func (s *BucketStore) sendStreamingChunks(
 	req *storepb.SeriesRequest,
 	srv storegatewaypb.StoreGateway_SeriesServer,
-	it seriesChunksSetIterator,
+	it iterator[seriesChunksSet],
 	stats *safeQueryStats,
 	totalSeriesCount int,
 ) error {
@@ -1063,7 +1065,7 @@ func (s *BucketStore) streamingChunksSetForBlocks(
 	seriesLimiter SeriesLimiter, // Rate limiter for loading series.
 	stats *safeQueryStats,
 	reuse []*reusedPostingsAndMatchers, // Should come from streamingSeriesForBlocks.
-) (seriesChunksSetIterator, error) {
+) (iterator[seriesChunksSet], error) {
 	it, err := s.getSeriesIteratorFromBlocks(ctx, req, blocks, indexReaders, shardSelector, matchers, chunksLimiter, seriesLimiter, stats, reuse, defaultStrategy)
 	if err != nil {
 		return nil, err
@@ -1084,12 +1086,13 @@ func (s *BucketStore) getSeriesIteratorFromBlocks(
 	stats *safeQueryStats,
 	reuse []*reusedPostingsAndMatchers, // Used if not empty. If not empty, len(reuse) must be len(blocks).
 	strategy seriesIteratorStrategy,
-) (seriesChunkRefsSetIterator, error) {
+) (iterator[seriesChunkRefsSet], error) {
 	var (
-		mtx     = sync.Mutex{}
-		batches = make([]seriesChunkRefsSetIterator, 0, len(blocks))
-		g, _    = errgroup.WithContext(ctx)
-		begin   = time.Now()
+		mtx                      = sync.Mutex{}
+		batches                  = make([]iterator[seriesChunkRefsSet], 0, len(blocks))
+		g, _                     = errgroup.WithContext(ctx)
+		begin                    = time.Now()
+		blocksQueriedByBlockMeta = make(map[blockQueriedMeta]int)
 	)
 	for i, b := range blocks {
 		b := b
@@ -1135,6 +1138,8 @@ func (s *BucketStore) getSeriesIteratorFromBlocks(
 
 			return nil
 		})
+
+		blocksQueriedByBlockMeta[newBlockQueriedMeta(b.meta)]++
 	}
 
 	err := g.Wait()
@@ -1144,6 +1149,9 @@ func (s *BucketStore) getSeriesIteratorFromBlocks(
 
 	stats.update(func(stats *queryStats) {
 		stats.blocksQueried = len(batches)
+		for sl, count := range blocksQueriedByBlockMeta {
+			stats.blocksQueriedByBlockMeta[sl] = count
+		}
 		stats.streamingSeriesExpandPostingsDuration += time.Since(begin)
 	})
 
@@ -1173,7 +1181,9 @@ func (s *BucketStore) recordSeriesCallResult(safeStats *safeQueryStats) {
 	s.metrics.seriesDataFetched.WithLabelValues("chunks", "refetched").Observe(float64(stats.chunksRefetched))
 	s.metrics.seriesDataSizeFetched.WithLabelValues("chunks", "refetched").Observe(float64(stats.chunksRefetchedSizeSum))
 
-	s.metrics.seriesBlocksQueried.Observe(float64(stats.blocksQueried))
+	for m, count := range stats.blocksQueriedByBlockMeta {
+		s.metrics.seriesBlocksQueried.WithLabelValues(string(m.source), strconv.Itoa(m.level), strconv.FormatBool(m.outOfOrder)).Observe(float64(count))
+	}
 
 	s.metrics.seriesDataTouched.WithLabelValues("chunks", "processed").Observe(float64(stats.chunksTouched))
 	s.metrics.seriesDataSizeTouched.WithLabelValues("chunks", "processed").Observe(float64(stats.chunksTouchedSizeSum))
@@ -1192,7 +1202,9 @@ func (s *BucketStore) recordLabelNamesCallResult(safeStats *safeQueryStats) {
 	s.recordSeriesHashCacheStats(stats)
 	s.recordStreamingSeriesStats(stats)
 
-	s.metrics.seriesBlocksQueried.Observe(float64(stats.blocksQueried))
+	for m, count := range stats.blocksQueriedByBlockMeta {
+		s.metrics.seriesBlocksQueried.WithLabelValues(string(m.source), strconv.Itoa(m.level), strconv.FormatBool(m.outOfOrder)).Observe(float64(count))
+	}
 }
 
 func (s *BucketStore) recordLabelValuesCallResult(safeStats *safeQueryStats) {
@@ -1320,6 +1332,7 @@ func (s *BucketStore) LabelNames(ctx context.Context, req *storepb.LabelNamesReq
 
 	var mtx sync.Mutex
 	var sets [][]string
+	var blocksQueriedByBlockMeta = make(map[blockQueriedMeta]int)
 	seriesLimiter := s.seriesLimiterFactory(s.metrics.queriesDropped.WithLabelValues("series"))
 
 	for _, b := range s.blocks {
@@ -1332,6 +1345,7 @@ func (s *BucketStore) LabelNames(ctx context.Context, req *storepb.LabelNamesReq
 		}
 
 		resHints.AddQueriedBlock(b.meta.ULID)
+		blocksQueriedByBlockMeta[newBlockQueriedMeta(b.meta)]++
 
 		indexr := b.loadedIndexReader(gctx, s.postingsStrategy, stats)
 
@@ -1365,6 +1379,9 @@ func (s *BucketStore) LabelNames(ctx context.Context, req *storepb.LabelNamesReq
 
 	stats.update(func(stats *queryStats) {
 		stats.blocksQueried = len(sets)
+		for sl, count := range blocksQueriedByBlockMeta {
+			stats.blocksQueriedByBlockMeta[sl] = count
+		}
 	})
 
 	anyHints, err := types.MarshalAny(resHints)
@@ -1616,7 +1633,7 @@ func blockLabelValues(ctx context.Context, b *bucketBlock, postingsStrategy post
 }
 
 func labelValuesFromSeries(ctx context.Context, labelName string, seriesPerBatch int, pendingMatchers []*labels.Matcher, indexr *bucketIndexReader, b *bucketBlock, matchersPostings []storage.SeriesRef, stats *safeQueryStats) ([]string, error) {
-	var iterator seriesChunkRefsSetIterator
+	var iterator iterator[seriesChunkRefsSet]
 	iterator = newLoadingSeriesChunkRefsSetIterator(
 		ctx,
 		newPostingsSetsIterator(matchersPostings, seriesPerBatch),
